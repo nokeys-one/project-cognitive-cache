@@ -1,0 +1,7 @@
+interface:
+  display_name: "Project Cognitive Cache"
+  short_description: "Avoid repeated full-project reads with a safe cache"
+  default_prompt: "Use $project-cognitive-cache to continue learning this project without rescanning unchanged files."
+
+policy:
+  allow_implicit_invocation: true
