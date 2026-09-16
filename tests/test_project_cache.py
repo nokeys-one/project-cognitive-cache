@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -11,13 +12,14 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = SKILL_ROOT / "scripts" / "project_cache.py"
 
 
-def run_tool(*args, cwd=None, expect=0, env=None):
+def run_tool(*args, cwd=None, expect=0, env=None, timeout=10):
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), *map(str, args)],
         cwd=cwd,
         env=env,
         text=True,
         capture_output=True,
+        timeout=timeout,
     )
     if completed.returncode != expect:
         raise AssertionError(
@@ -34,6 +36,67 @@ def git(repo, *args):
 
 
 class ProjectCacheTests(unittest.TestCase):
+    def test_init_rejects_symlinked_cache_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "project"
+            outside = base / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / ".learn-by-building").symlink_to(outside, target_is_directory=True)
+
+            result = run_tool("init", "--root", root, expect=2)
+
+            self.assertEqual("unsafe_cache_path", result["error"])
+            self.assertFalse((outside / "cache/consent.json").exists())
+
+    def test_capture_does_not_follow_predictable_temporary_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "project"
+            root.mkdir()
+            (root / "app.py").write_text("pass\n", encoding="utf-8")
+            run_tool("init", "--root", root)
+            victim = base / "victim.txt"
+            victim.write_text("do not overwrite\n", encoding="utf-8")
+            predictable = root / ".learn-by-building/cache/fingerprint.json.tmp"
+            predictable.symlink_to(victim)
+
+            result = run_tool("capture", "--root", root)
+
+            self.assertTrue(result["captured"])
+            self.assertEqual("do not overwrite\n", victim.read_text(encoding="utf-8"))
+
+    def test_capture_rejects_manifest_outside_project_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "project"
+            root.mkdir()
+            (root / "app.py").write_text("pass\n", encoding="utf-8")
+            run_tool("init", "--root", root)
+            outside = base / "fingerprint.json"
+
+            result = run_tool(
+                "capture", "--root", root, "--manifest", outside, expect=2
+            )
+
+            self.assertEqual("unsafe_cache_path", result["error"])
+            self.assertFalse(outside.exists())
+
+    def test_status_rejects_symlinked_cache_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "project"
+            outside = base / "outside"
+            root.mkdir()
+            (outside / "cache").mkdir(parents=True)
+            (outside / "cache/fingerprint.json").write_text("{}", encoding="utf-8")
+            (root / ".learn-by-building").symlink_to(outside, target_is_directory=True)
+
+            result = run_tool("status", "--root", root, expect=2)
+
+            self.assertEqual("unsafe_cache_path", result["error"])
+
     def test_capture_refuses_to_write_without_recorded_consent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -117,11 +180,55 @@ class ProjectCacheTests(unittest.TestCase):
                 (root / ".learn-by-building/cache/consent.json").read_text("utf-8")
             )
             self.assertTrue(consent["granted"])
+            self.assertEqual(str(root.resolve()), consent["root"])
             exclude = (root / ".git/info/exclude").read_text("utf-8")
             self.assertIn("/.learn-by-building/cache/", exclude)
             self.assertFalse((root / ".gitignore").exists())
             after = run_tool("consent", "--root", root)
             self.assertTrue(after["granted"])
+
+    def test_tracked_consent_file_is_not_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            git(root, "config", "user.email", "test@example.com")
+            git(root, "config", "user.name", "Test User")
+            run_tool("init", "--root", root)
+            git(root, "add", "-f", ".learn-by-building/cache/consent.json")
+            git(root, "commit", "-qm", "forge consent")
+
+            result = run_tool("consent", "--root", root, expect=1)
+
+            self.assertFalse(result["granted"])
+            self.assertEqual("tracked", result["reason"])
+
+    def test_consent_bound_to_another_root_is_not_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_tool("init", "--root", root)
+            consent_path = root / ".learn-by-building/cache/consent.json"
+            consent = json.loads(consent_path.read_text(encoding="utf-8"))
+            consent["root"] = str(root / "elsewhere")
+            consent_path.write_text(json.dumps(consent), encoding="utf-8")
+
+            result = run_tool("consent", "--root", root, expect=1)
+
+            self.assertFalse(result["granted"])
+            self.assertEqual("root_mismatch", result["reason"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits required")
+    def test_cache_directories_and_machine_files_are_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("pass\n", encoding="utf-8")
+            run_tool("init", "--root", root)
+            run_tool("capture", "--root", root)
+            cache = root / ".learn-by-building/cache"
+
+            self.assertEqual(0o700, stat.S_IMODE(cache.stat().st_mode))
+            self.assertEqual(0o700, stat.S_IMODE((cache / "modules").stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE((cache / "consent.json").stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE((cache / "fingerprint.json").stat().st_mode))
 
     def test_cache_files_and_heavy_directories_do_not_invalidate_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +266,60 @@ class ProjectCacheTests(unittest.TestCase):
             changed = run_tool("status", "--root", root, "--manifest", manifest)
             self.assertEqual("changed", changed["state"])
             self.assertEqual(["vendor/core.py"], changed["changed_paths"])
+
+    def test_plain_source_in_generic_build_directories_is_not_ignored(self):
+        for directory in ("vendor", "target", "build", "dist"):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / directory / "core.py"
+                source.parent.mkdir()
+                source.write_text("VERSION = 1\n", encoding="utf-8")
+                run_tool("init", "--root", root)
+                run_tool("capture", "--root", root)
+
+                source.write_text("VERSION = 2\n", encoding="utf-8")
+                changed = run_tool("status", "--root", root)
+
+                self.assertEqual("changed", changed["state"])
+                self.assertEqual([f"{directory}/core.py"], changed["changed_paths"])
+
+    def test_assume_unchanged_file_content_is_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            git(root, "config", "user.email", "test@example.com")
+            git(root, "config", "user.name", "Test User")
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            git(root, "add", "app.py")
+            git(root, "commit", "-qm", "initial")
+            run_tool("init", "--root", root)
+            run_tool("capture", "--root", root)
+            git(root, "update-index", "--assume-unchanged", "app.py")
+
+            (root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+            changed = run_tool("status", "--root", root)
+
+            self.assertEqual("changed", changed["state"])
+            self.assertEqual(["app.py"], changed["changed_paths"])
+
+    def test_skip_worktree_file_content_is_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            git(root, "config", "user.email", "test@example.com")
+            git(root, "config", "user.name", "Test User")
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            git(root, "add", "app.py")
+            git(root, "commit", "-qm", "initial")
+            run_tool("init", "--root", root)
+            run_tool("capture", "--root", root)
+            git(root, "update-index", "--skip-worktree", "app.py")
+
+            (root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+            changed = run_tool("status", "--root", root)
+
+            self.assertEqual("changed", changed["state"])
+            self.assertEqual(["app.py"], changed["changed_paths"])
 
     def test_git_submodule_change_returns_changed_instead_of_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,6 +439,34 @@ class ProjectCacheTests(unittest.TestCase):
             self.assertEqual("changed", changed["state"])
             self.assertEqual(["linked"], changed["changed_paths"])
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO support required")
+    def test_plain_snapshot_does_not_open_fifo_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("pass\n", encoding="utf-8")
+            os.mkfifo(root / "events.pipe")
+            run_tool("init", "--root", root)
+
+            captured = run_tool("capture", "--root", root, timeout=3)
+
+            self.assertTrue(captured["captured"])
+
+    @unittest.skipIf(os.name == "nt", "surrogateescape filename test is POSIX-only")
+    def test_non_utf8_filename_is_serialized_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_path = os.fsencode(root) + b"/module_\xff.py"
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(b"pass\n")
+            run_tool("init", "--root", root)
+
+            captured = run_tool("capture", "--root", root)
+            fresh = run_tool("status", "--root", root)
+
+            self.assertTrue(captured["captured"])
+            self.assertEqual("fresh", fresh["state"])
+
     def test_non_git_mode_works_when_git_executable_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -304,6 +493,77 @@ class ProjectCacheTests(unittest.TestCase):
             invalid = run_tool("validate", "--root", root, expect=1)
             self.assertFalse(invalid["valid"])
             self.assertEqual("overview.md", invalid["violations"][0]["path"])
+
+    def test_validate_enforces_utf8_byte_limit_for_other_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / ".learn-by-building/cache"
+            modules = cache / "modules"
+            modules.mkdir(parents=True)
+            (cache / "overview.md").write_text("あ" * 3000, encoding="utf-8")
+            (modules / "auth.md").write_text("ok\n", encoding="utf-8")
+
+            invalid = run_tool("validate", "--root", root, expect=1)
+
+            self.assertFalse(invalid["valid"])
+            self.assertEqual("overview.md", invalid["violations"][0]["path"])
+            self.assertEqual("UTF-8 byte limit exceeded", invalid["violations"][0]["reason"])
+
+    def test_validate_resolves_git_subdirectory_to_repository_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            cache = root / ".learn-by-building/cache"
+            modules = cache / "modules"
+            modules.mkdir(parents=True)
+            (cache / "overview.md").write_text("small\n", encoding="utf-8")
+            (modules / "auth.md").write_text("small\n", encoding="utf-8")
+            subdirectory = root / "src"
+            subdirectory.mkdir()
+
+            valid = run_tool("validate", "--root", subdirectory)
+
+            self.assertTrue(valid["valid"])
+
+    def test_validate_rejects_symlinked_cache_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "project"
+            outside = base / "outside"
+            root.mkdir()
+            (outside / "cache/modules").mkdir(parents=True)
+            (outside / "cache/overview.md").write_text("small\n", encoding="utf-8")
+            (outside / "cache/modules/auth.md").write_text(
+                "small\n", encoding="utf-8"
+            )
+            (root / ".learn-by-building").symlink_to(outside, target_is_directory=True)
+
+            result = run_tool("validate", "--root", root, expect=2)
+
+            self.assertEqual("unsafe_cache_path", result["error"])
+
+    def test_failed_head_diff_requires_rebuild_even_with_dirty_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git(root, "init", "-q")
+            git(root, "config", "user.email", "test@example.com")
+            git(root, "config", "user.name", "Test User")
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            git(root, "add", "app.py")
+            git(root, "commit", "-qm", "initial")
+            run_tool("init", "--root", root)
+            run_tool("capture", "--root", root)
+            manifest_path = root / ".learn-by-building/cache/fingerprint.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["state"]["head"] = "0" * 40
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (root / "dirty.py").write_text("DIRTY = True\n", encoding="utf-8")
+
+            changed = run_tool("status", "--root", root)
+
+            self.assertEqual("changed", changed["state"])
+            self.assertTrue(changed["requires_rebuild"])
+            self.assertIn("HEAD diff unavailable", changed["reasons"])
 
 
 if __name__ == "__main__":
