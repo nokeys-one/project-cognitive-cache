@@ -22,11 +22,12 @@ The second layer is persistent, bounded, locally ignored by Git, and invalidated
 ## Key properties
 
 - **Consent first:** the first project onboarding stays read-only; cache files are created only after explicit approval.
-- **Fast freshness checks:** Git projects use `HEAD`, working-tree paths, and lightweight content hashes; ordinary folders use a file manifest and hashes.
+- **Fast freshness checks:** Git projects use `HEAD`, working-tree paths, and lightweight content hashes, including paths hidden by `assume-unchanged` or `skip-worktree`; ordinary folders use a file manifest and hashes.
 - **Incremental reads:** unchanged projects reuse a short overview; changed projects expose only `changed_paths` for focused inspection.
 - **Hard context limits:** the overview and module summaries have fixed size budgets and are loaded on demand.
 - **Local by default:** Git repositories exclude `.learn-by-building/cache/` through `.git/info/exclude`, so cache state is not committed.
 - **Portable:** the helper uses only the Python standard library and supports Git and non-Git projects.
+- **Fail-closed safety:** copied or tracked consent is rejected, cache writes cannot escape through symlinks, and incomplete Git history forces a rebuild.
 
 ## How it works
 
@@ -103,6 +104,12 @@ Behavioral evaluation prompts are documented in [tests/behavioral-scenarios.md](
 
 The cache must contain concise architectural summaries, paths, confidence labels, and unresolved questions—not secrets, credentials, raw source dumps, or personal data. Delete `.learn-by-building/cache/` at any time to remove the derived cache; it can be rebuilt later with fresh consent.
 
+Consent is bound to the canonical local project path and is invalid if committed to Git or copied to another clone. Machine files are restricted to the real `.learn-by-building/cache/` directory and use private filesystem permissions. A version-1 fingerprint or consent record is intentionally rejected by version 1.0.1 and must be recreated after approval.
+
+Plain-folder mode excludes only explicit metadata, dependency, and tool-cache directories such as `.git`, `.learn-by-building`, `.venv`, `node_modules`, and Python test/type-check caches. Generic names such as `vendor`, `target`, `build`, and `dist` are scanned because they can contain project source.
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability privately.
+
 ## Attribution
 
 This independent project was inspired by [learn-by-building](https://github.com/chaojiwudibing/learn-by-building), created by [chaojiwudibing](https://github.com/chaojiwudibing). That original project introduced the learning-oriented Agent Skill context from which this token-efficiency extension was designed.
@@ -112,4 +119,3 @@ Project Cognitive Cache is not an official release of, or affiliated with, the o
 ## License
 
 Project Cognitive Cache is released under the [MIT License](LICENSE).
-

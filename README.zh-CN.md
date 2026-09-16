@@ -22,11 +22,12 @@ Project Cognitive Cache 会把已经验证过的项目认知保存成短小的�
 ## 核心特性
 
 - **先授权再写入：** 首次项目导览保持只读，得到用户明确同意后才创建缓存。
-- **快速新鲜度检查：** Git 项目使用 `HEAD`、工作区路径和轻量哈希；普通文件夹使用文件清单和哈希。
+- **快速新鲜度检查：** Git 项目使用 `HEAD`、工作区路径和轻量哈希，并显式检查被 `assume-unchanged` 或 `skip-worktree` 隐藏的路径；普通文件夹使用文件清单和哈希。
 - **增量读取：** 项目未变化时只复用短总览；项目变化时只返回 `changed_paths`，引导模型聚焦受影响区域。
 - **分层硬上限：** 总览和模块摘要都有固定预算，并按需加载，缓存不会无限膨胀。
 - **默认仅本地：** Git 项目通过 `.git/info/exclude` 忽略 `.learn-by-building/cache/`，不会污染仓库提交。
 - **轻量可移植：** 辅助脚本仅使用 Python 标准库，同时支持 Git 与非 Git 项目。
+- **默认拒绝不确定状态：** 复制或提交进仓库的授权不会生效，缓存写入不能通过符号链接逃逸，Git 历史不完整时会要求重建认知。
 
 ## 工作流程
 
@@ -103,6 +104,12 @@ python -m unittest discover -s tests -v
 
 缓存只应保存简洁的架构摘要、路径、置信度和待确认问题，不应保存密码、令牌、大段源码或个人数据。删除 `.learn-by-building/cache/` 即可清除派生缓存；未来可以在重新授权后重建。
 
+授权记录绑定本机项目的规范路径；如果它被提交到 Git 或复制到另一个克隆中，就会失效。机器文件只能写入真实且非符号链接的 `.learn-by-building/cache/` 目录，并使用私有文件权限。1.0.1 会主动拒绝版本 1 的指纹和授权记录，用户重新同意后即可重建。
+
+普通文件夹模式只排除明确的元数据、依赖和工具缓存目录，例如 `.git`、`.learn-by-building`、`.venv`、`node_modules` 以及 Python 测试/类型检查缓存。`vendor`、`target`、`build`、`dist` 等通用目录名可能包含项目源码，因此会参与扫描。
+
+如需私下报告安全问题，请参阅 [SECURITY.md](SECURITY.md)。
+
 ## 原项目与作者致谢
 
 本项目受到 [chaojiwudibing](https://github.com/chaojiwudibing) 创建的 [learn-by-building](https://github.com/chaojiwudibing/learn-by-building) 启发。原项目提供了“AI 在完成真实项目的同时帮助用户学习”的 Agent Skill 语境，本项目在此基础上独立设计了面向 Token 成本的项目认知缓存机制。
@@ -112,4 +119,3 @@ Project Cognitive Cache 不是原项目的官方版本，也不代表原作者�
 ## 许可证
 
 Project Cognitive Cache 采用 [MIT License](LICENSE) 发布。
-

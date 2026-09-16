@@ -13,7 +13,7 @@ Reuse verified project understanding only after a cheap fingerprint check. Treat
 
 Locate the project root and bundled `scripts/project_cache.py` without reading the script itself.
 
-1. Run `python <skill>/scripts/project_cache.py consent --root <project>`. If it does not return `granted: true`, keep the first onboarding read-only. Perform a bounded, useful initial inspection, then ask once for permission to create a local cache. Do not create cache files or modify ignore rules before approval.
+1. Run `python <skill>/scripts/project_cache.py consent --root <project>`. If it does not return `granted: true`, keep the first onboarding read-only. Perform a bounded, useful initial inspection, then ask once for permission to create a local cache. Do not create cache files or modify ignore rules before approval. A copied, tracked, root-mismatched, or legacy consent record is not valid approval.
 2. After explicit approval, run `python <skill>/scripts/project_cache.py init --root <project>`.
 3. When consent exists, run `status --root <project>` before reading project files.
 
@@ -32,6 +32,8 @@ Expand beyond this scope only when concrete evidence shows cross-cutting behavio
 
 Store cache data under `.learn-by-building/cache/`. For Git projects, `init` adds that path to `.git/info/exclude`, not `.gitignore`; the cache remains local and uncommitted by default.
 
+Do not place manifests outside that directory or use symlinks for the cache path. The helper rejects both cases and writes machine files with private permissions.
+
 After verified changes:
 
 1. Update `overview.md` only if project-wide facts changed.
@@ -43,8 +45,8 @@ Never cache secrets, credentials, raw source blocks, user data, or unsupported g
 
 ## Hard loading budget
 
-- `overview.md`: at most 1,800 CJK characters or 600 English words.
-- Each module summary: at most 1,200 CJK characters or 400 English words.
+- `overview.md`: at most 1,800 CJK characters, 600 English words, and 7,200 UTF-8 bytes.
+- Each module summary: at most 1,200 CJK characters, 400 English words, and 4,800 UTF-8 bytes.
 - Never load all module summaries by default.
 - The JSON fingerprint is machine state: use the script output; do not load the manifest into model context.
 
